@@ -11,25 +11,25 @@ public class TokenBucket {
 
     private final ReentrantLock lock = new ReentrantLock();
 
-    public TokenBucket(double capacity, double refillRatePerSecond){
+    public TokenBucket(double capacity, double refillRatePerSecond) {
         this.capacity = capacity;
-        this.refillRatePerNano = refillRatePerSecond/1_000_000_000.0;
+        this.refillRatePerNano = refillRatePerSecond / 1_000_000_000.0;
         this.tokens = capacity; // Inicio con bucket lleno
         this.lastRefillTimestampNanos = System.nanoTime();
     }
 
-    public boolean tryConsume(){
+    public boolean tryConsume() {
         lock.lock();
         try {
             long now = System.nanoTime();
             long elapsed = now - this.lastRefillTimestampNanos;
 
             // Lazy evaluation
-            double tokensToAdd = elapsed*refillRatePerNano;
+            double tokensToAdd = elapsed * refillRatePerNano;
             this.tokens = Math.min(capacity, this.tokens + tokensToAdd);
             this.lastRefillTimestampNanos = now;
 
-            if (this.tokens >= 1.0){
+            if (this.tokens >= 1.0) {
                 this.tokens -= 1.0;
                 return true; // petición permitida
             }
@@ -41,5 +41,14 @@ public class TokenBucket {
 
     public long getLastRefillTimestampNanos() {
         return this.lastRefillTimestampNanos;
+    }
+
+    public double getTokens() {
+        lock.lock();
+        try {
+            return this.tokens;
+        } finally {
+            lock.unlock();
+        }
     }
 }

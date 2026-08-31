@@ -1,5 +1,6 @@
 package com.camss.server;
 
+import com.camss.core.RateLimiterService;
 import com.sun.net.httpserver.HttpContext;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -14,11 +15,11 @@ public class SimpleHttpServer {
         int port = 8080;
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
 
-        //TODO: instanciar servicio de RateLimit
+        RateLimiterService rateLimiterService = new RateLimiterService(5.0, 1.0);
 
         // Crear contexto base y registrar filtro
         HttpContext context = server.createContext("/", new RootHandler());
-        context.getFilters().add(null); // TODO: añadir RateLimitFilter
+        context.getFilters().add(new RateLimitFilter(rateLimiterService));
 
         // Pool de hilos para soportar concurrencia real
         server.setExecutor(Executors.newFixedThreadPool(10));
