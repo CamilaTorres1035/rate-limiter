@@ -1,94 +1,116 @@
 package com.camss.core;
 
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 class TokenBucketTest {
 
-    @Test
-    void shouldRefillTokensAfterElapsedTime() throws Exception {
-        TokenBucket bucket = new TokenBucket(2, 2);
-        long now = System.nanoTime();
+    private AtomicLong simulatedTimeNanos;
 
-        setField(bucket, "tokens", 0.0);
-        setField(bucket, "lastRefillTimestampNanos", now - TimeUnit.SECONDS.toNanos(2));
+    @BeforeEach
+    void setUp() {
+        // Inicializamos el tiempo simulado en 0
+        simulatedTimeNanos = new AtomicLong(0);
+    }
 
-        assertTrue(bucket.tryConsume());
-        assertEquals(1.0, getField(bucket, "tokens"));
-        assertTrue(bucket.tryConsume());
+    private TokenBucket createBucket(double capacity, double refillRatePerSecond) {
+        // Inyectamos el reloj simulado controlado por nosotros
+        return new TokenBucket(capacity, refillRatePerSecond, simulatedTimeNanos::get);
     }
 
     @Test
-    void shouldNotConsumeWhenRefillIsNotEnoughToReachOneToken() throws Exception {
-        TokenBucket bucket = new TokenBucket(2, 1);
-        long now = System.nanoTime();
+    @DisplayName("Debe permitir consumir tokens hasta agotar la capacidad inicial")
+    void testConsumeInitialCapacity() {
+        TokenBucket bucket = createBucket(3.0, 1.0);
 
-        setField(bucket, "tokens", 0.0);
-        setField(bucket, "lastRefillTimestampNanos", now - TimeUnit.MILLISECONDS.toNanos(400));
+        assertTrue(bucket.tryConsume(), "Petición 1 permitida");
+        assertTrue(bucket.tryConsume(), "Petición 2 permitida");
+        assertTrue(bucket.tryConsume(), "Petición 3 permitida");
 
+        assertFalse(bucket.tryConsume(), "Petición 4 rechazada por falta de tokens");
+    }
+
+    @Test
+    @DisplayName("Debe recargar tokens proporcionalmente al tiempo simulado transcurrido")
+    void testTokenRefillOverTime() {
+        // Capacidad: 2 tokens. Tasa de recarga: 1 token por segundo (1,000,000,000 ns)
+        TokenBucket bucket = createBucket(2.0, 1.0);
+
+        // Agotamos el bucket
+        assertTrue(bucket.tryConsume());
+        assertTrue(bucket.tryConsume());
         assertFalse(bucket.tryConsume());
-        assertEquals(0.4, getField(bucket, "tokens"), 0.05);
+
+        // Simulamos el paso de 1.5 segundos
+        long oneAndHalfSecondsInNanos = 1_500_000_000L;
+        simulatedTimeNanos.addAndGet(oneAndHalfSecondsInNanos);
+
+        // Ahora debe permitir consumir 1 token acumulado
+        assertTrue(bucket.tryConsume(), "Debe permitir consumir el token recargado");
+        assertFalse(bucket.tryConsume(), "No debe tener tokens suficientes para una segunda petición");
     }
 
     @Test
-    void shouldRespectCapacityUnderSimpleConcurrentAccess() throws Exception {
-        TokenBucket bucket = new TokenBucket(1, 0);
-        ExecutorService executor = Executors.newFixedThreadPool(8);
+    @DisplayName("La recarga de tokens no debe exceder la capacidad máxima")
+    void testRefillDoesNotExceedCapacity() {
+        TokenBucket bucket = createBucket(2.0, 1.0);
 
-        try {
-            List<Callable<Boolean>> tasks = new ArrayList<>();
-            for (int i = 0; i < 20; i++) {
-                tasks.add(bucket::tryConsume);
-            }
+        // Consumimos 1 token
+        assertTrue(bucket.tryConsume());
 
-            List<Future<Boolean>> futures = new ArrayList<>();
-            for (Callable<Boolean> task : tasks) {
-                futures.add(executor.submit(task));
-            }
+        // Simulamos el paso de 10 segundos (debería generar 10 tokens, pero la capacidad es 2)
+        simulatedTimeNanos.addAndGet(10_000_000_000L);
 
-            int allowed = 0;
-            for (Future<Boolean> future : futures) {
+        // Intentamos consumir 2 tokens (el máximo permitido)
+        assertTrue(bucket.tryConsume(), "Consume token 1");
+        assertTrue(bucket.tryConsume(), "Consume token 2");
+
+        // El tercer consumo consecutivo debe fallar porque el límite máximo es 2
+        assertFalse(bucket.tryConsume(), "Excede la capacidad máxima del bucket");
+    }
+
+    @Test
+    @DisplayName("Verificación de Concurrencia: Múltiples hilos compitiendo por los mismos tokens")
+    void testConcurrentConsumption() throws InterruptedException {
+        int threads = 10;
+        int capacity = 5;
+        
+        // Usamos tiempo de sistema real para la prueba de concurrencia
+        TokenBucket bucket = new TokenBucket(capacity, 1.0);
+
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        CountDownLatch latch = new CountDownLatch(threads);
+
+        AtomicInteger successCount = new AtomicInteger(0);
+        AtomicInteger rejectedCount = new AtomicInteger(0);
+
+        for (int i = 0; i < threads; i++) {
+            executor.submit(() -> {
                 try {
-                    if (future.get()) {
-                        allowed++;
+                    if (bucket.tryConsume()) {
+                        successCount.incrementAndGet();
+                    } else {
+                        rejectedCount.incrementAndGet();
                     }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw e;
-                } catch (ExecutionException e) {
-                    throw new AssertionError("La ejecución concurrente falló", e.getCause());
+                } finally {
+                    latch.countDown();
                 }
-            }
-
-            assertEquals(1, allowed);
-            assertEquals(0.0, getField(bucket, "tokens"));
-        } finally {
-            executor.shutdownNow();
+            });
         }
-    }
 
-    private static void setField(Object target, String fieldName, Object value) throws Exception {
-        Field field = target.getClass().getDeclaredField(fieldName);
-        field.setAccessible(true);
-        field.set(target, value);
-    }
+        latch.await();
+        executor.shutdown();
 
-    private static double getField(Object target, String fieldName) throws Exception {
-        Field field = target.getClass().getDeclaredField(fieldName);
-        field.setAccessible(true);
-        return field.getDouble(target);
+        assertEquals(capacity, successCount.get(), "Exactamente 5 peticiones deben haber sido aceptadas");
+        assertEquals(threads - capacity, rejectedCount.get(), "Exactamente 5 peticiones deben haber sido rechazadas");
     }
 }
