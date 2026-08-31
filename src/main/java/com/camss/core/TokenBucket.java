@@ -38,4 +38,8 @@ public class TokenBucket {
             lock.unlock();
         }
     }
+
+    public long getLastRefillTimestampNanos() {
+        return this.lastRefillTimestampNanos;
+    }
 }
